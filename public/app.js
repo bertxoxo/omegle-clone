@@ -25,12 +25,14 @@ ageCheckbox.addEventListener("change", () => {
 
 const setupScreen = document.getElementById("setupScreen");
 const chatScreen = document.getElementById("chatScreen");
-const statusText = document.getElementById("statusText");
+const statusLabel = document.getElementById("statusLabel");
+const waitingDots = document.getElementById("waitingDots");
 const videoGrid = document.getElementById("videoGrid");
 const textOnlyNotice = document.getElementById("textOnlyNotice");
 const localVideo = document.getElementById("localVideo");
 const remoteVideo = document.getElementById("remoteVideo");
 const chatLog = document.getElementById("chatLog");
+const typingIndicator = document.getElementById("typingIndicator");
 const chatInput = document.getElementById("chatInput");
 const sendBtn = document.getElementById("sendBtn");
 const nextBtn = document.getElementById("nextBtn");
@@ -47,6 +49,7 @@ let socket = null;
 let localStream = null;
 let peerConnection = null;
 let currentMode = "video";
+let typingTimeout = null;
 
 const ICE_SERVERS = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
@@ -60,11 +63,17 @@ function logMessage(text, cls) {
   chatLog.scrollTop = chatLog.scrollHeight;
 }
 
+function setStatus(text, waiting) {
+  statusLabel.textContent = text;
+  waitingDots.style.display = waiting ? "inline-flex" : "none";
+}
+
 startBtn.addEventListener("click", async () => {
   currentMode = selectedMode;
   setupScreen.style.display = "none";
   chatScreen.style.display = "block";
   chatLog.innerHTML = "";
+  typingIndicator.style.display = "none";
 
   if (currentMode === "video") {
     videoGrid.style.display = "grid";
@@ -76,7 +85,7 @@ startBtn.addEventListener("click", async () => {
       logMessage("Could not access camera/mic: " + err.message, "sys");
       videoGrid.style.display = "none";
       textOnlyNotice.style.display = "block";
-      currentMode = "text"; // fall back gracefully
+      currentMode = "text";
     }
   } else {
     videoGrid.style.display = "none";
@@ -98,11 +107,12 @@ function connectAndFindMatch() {
   });
 
   socket.on("waiting", () => {
-    statusText.textContent = "Waiting for a match…";
+    setStatus("Waiting for a match", true);
   });
 
   socket.on("matched", async ({ initiator }) => {
-    statusText.textContent = "Connected to a stranger";
+    setStatus("Connected to a stranger", false);
+    typingIndicator.style.display = "none";
     logMessage("You are now chatting with a stranger.", "sys");
     if (currentMode === "video") {
       await setupPeerConnection(initiator);
@@ -110,7 +120,8 @@ function connectAndFindMatch() {
   });
 
   socket.on("partner-left", () => {
-    statusText.textContent = "Stranger disconnected";
+    setStatus("Stranger disconnected", false);
+    typingIndicator.style.display = "none";
     logMessage("Stranger has disconnected.", "sys");
     teardownPeerConnection();
   });
@@ -134,7 +145,12 @@ function connectAndFindMatch() {
   });
 
   socket.on("chat-message", (data) => {
+    typingIndicator.style.display = "none";
     logMessage("Stranger: " + data.text, "them");
+  });
+
+  socket.on("typing", (data) => {
+    typingIndicator.style.display = data.typing ? "block" : "none";
   });
 
   socket.on("report-received", () => {
@@ -180,9 +196,20 @@ chatInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") sendChatMessage();
 });
 
+chatInput.addEventListener("input", () => {
+  if (!socket) return;
+  socket.emit("typing", { typing: true });
+  clearTimeout(typingTimeout);
+  typingTimeout = setTimeout(() => {
+    socket.emit("typing", { typing: false });
+  }, 1200);
+});
+
 function sendChatMessage() {
   const text = chatInput.value.trim();
   if (!text || !socket) return;
+  clearTimeout(typingTimeout);
+  socket.emit("typing", { typing: false });
   socket.emit("chat-message", { text });
   logMessage("You: " + text, "me");
   chatInput.value = "";
@@ -192,7 +219,8 @@ nextBtn.addEventListener("click", () => {
   if (!socket) return;
   teardownPeerConnection();
   socket.emit("next");
-  statusText.textContent = "Finding a new match…";
+  setStatus("Finding a new match", true);
+  typingIndicator.style.display = "none";
   chatLog.innerHTML = "";
   socket.emit("find-match", {
     mode: currentMode,

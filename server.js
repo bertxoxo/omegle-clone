@@ -1,19 +1,5 @@
 /**
  * Signaling + matchmaking server.
- *
- * Matching rule:
- *  - A "filtered" user has country and/or tags set.
- *  - A "universal" user has no filters set at all.
- *  - Filtered <-> Filtered: only match if country matches (when both set)
- *    AND at least one shared tag (when both have tags set).
- *  - Filtered <-> Universal: always allowed (universal = open to anyone).
- *  - Universal <-> Universal: always allowed.
- *
- * This is an MVP scaffold. It does NOT include:
- *  - real age/ID verification
- *  - CSAM hash-matching / content moderation
- *  - persistent storage (reports are written to a local JSON file for now)
- * Those need real third-party integrations before this goes anywhere public.
  */
 
 const express = require("express");
@@ -30,28 +16,22 @@ const io = new Server(server, { cors: { origin: "*" } });
 app.use(express.static(path.join(__dirname, "public")));
 app.use(express.json());
 
-// ---- In-memory state ----
-// queue: array of waiting users { socketId, mode, country, tags }
 const queue = [];
-// active pairs: socketId -> partnerSocketId
 const pairs = new Map();
-// socketId -> profile (mode/country/tags), kept for report logging
 const profiles = new Map();
+
+const RELAXED_MATCH_DELAY_MS = 6000; // widen search after this long
 
 const REPORTS_FILE = path.join(__dirname, "reports.json");
 if (!fs.existsSync(REPORTS_FILE)) fs.writeFileSync(REPORTS_FILE, "[]");
 
 function anonId(socketId) {
-  // Don't log raw socket IDs in reports; hash them instead.
   return crypto.createHash("sha256").update(socketId).digest("hex").slice(0, 16);
 }
 
 function normalizeTags(tags) {
   if (!Array.isArray(tags)) return [];
-  return tags
-    .map((t) => String(t).trim().toLowerCase())
-    .filter(Boolean)
-    .slice(0, 10); // cap to avoid abuse
+  return tags.map((t) => String(t).trim().toLowerCase()).filter(Boolean).slice(0, 10);
 }
 
 function isUniversal(profile) {
@@ -59,23 +39,15 @@ function isUniversal(profile) {
 }
 
 function isCompatible(a, b) {
-  // Must be same chat mode (video vs text)
   if (a.mode !== b.mode) return false;
-
   const aUniversal = isUniversal(a);
   const bUniversal = isUniversal(b);
-
   if (aUniversal || bUniversal) return true;
-
-  // Both filtered: country must match if both set one
   if (a.country && b.country && a.country !== b.country) return false;
-
-  // Both filtered: need at least one overlapping tag if both set tags
   if (a.tags.length && b.tags.length) {
     const overlap = a.tags.some((t) => b.tags.includes(t));
     if (!overlap) return false;
   }
-
   return true;
 }
 
@@ -84,6 +56,7 @@ function findMatch(profile) {
     const candidate = queue[i];
     if (candidate.socketId === profile.socketId) continue;
     if (isCompatible(profile, candidate)) {
+      clearTimeout(candidate.relaxedTimer);
       queue.splice(i, 1);
       return candidate;
     }
@@ -93,7 +66,10 @@ function findMatch(profile) {
 
 function removeFromQueue(socketId) {
   const idx = queue.findIndex((u) => u.socketId === socketId);
-  if (idx !== -1) queue.splice(idx, 1);
+  if (idx !== -1) {
+    clearTimeout(queue[idx].relaxedTimer);
+    queue.splice(idx, 1);
+  }
 }
 
 function disconnectPair(socketId) {
@@ -105,6 +81,33 @@ function disconnectPair(socketId) {
   }
 }
 
+// After a delay, if a queued user still hasn't found a filtered match,
+// pair them with anyone else waiting in the same mode, ignoring filters.
+function tryRelaxedMatch(socketId) {
+  const selfIdx = queue.findIndex((u) => u.socketId === socketId);
+  if (selfIdx === -1) return; // already matched or left
+  const profile = queue[selfIdx];
+
+  const candidateIdx = queue.findIndex(
+    (u) => u.socketId !== socketId && u.mode === profile.mode
+  );
+
+  if (candidateIdx !== -1) {
+    const candidate = queue[candidateIdx];
+    clearTimeout(candidate.relaxedTimer);
+    clearTimeout(profile.relaxedTimer);
+
+    [selfIdx, candidateIdx].sort((a, b) => b - a).forEach((i) => queue.splice(i, 1));
+
+    pairs.set(profile.socketId, candidate.socketId);
+    pairs.set(candidate.socketId, profile.socketId);
+    io.to(candidate.socketId).emit("matched", { initiator: true });
+    io.to(profile.socketId).emit("matched", { initiator: false });
+  } else {
+    profile.relaxedTimer = setTimeout(() => tryRelaxedMatch(socketId), RELAXED_MATCH_DELAY_MS);
+  }
+}
+
 io.on("connection", (socket) => {
   socket.on("find-match", (data) => {
     const profile = {
@@ -112,10 +115,10 @@ io.on("connection", (socket) => {
       mode: data.mode === "video" ? "video" : "text",
       country: (data.country || "").trim().toUpperCase() || null,
       tags: normalizeTags(data.tags),
+      relaxedTimer: null,
     };
     profiles.set(socket.id, profile);
 
-    // If already paired or queued, clean that up first
     disconnectPair(socket.id);
     removeFromQueue(socket.id);
 
@@ -123,29 +126,30 @@ io.on("connection", (socket) => {
     if (match) {
       pairs.set(socket.id, match.socketId);
       pairs.set(match.socketId, socket.id);
-      // The earlier-queued user (match) initiates the WebRTC offer
       io.to(match.socketId).emit("matched", { initiator: true });
       io.to(socket.id).emit("matched", { initiator: false });
     } else {
+      profile.relaxedTimer = setTimeout(() => tryRelaxedMatch(socket.id), RELAXED_MATCH_DELAY_MS);
       queue.push(profile);
       socket.emit("waiting");
     }
   });
 
-  // WebRTC signaling relay
   socket.on("signal", (data) => {
     const partnerId = pairs.get(socket.id);
-    if (partnerId) {
-      io.to(partnerId).emit("signal", data);
-    }
+    if (partnerId) io.to(partnerId).emit("signal", data);
   });
 
-  // Text chat relay
   socket.on("chat-message", (data) => {
     const partnerId = pairs.get(socket.id);
     if (partnerId) {
       io.to(partnerId).emit("chat-message", { text: String(data.text || "").slice(0, 1000) });
     }
+  });
+
+  socket.on("typing", (data) => {
+    const partnerId = pairs.get(socket.id);
+    if (partnerId) io.to(partnerId).emit("typing", { typing: !!data.typing });
   });
 
   socket.on("next", () => {

@@ -86,6 +86,12 @@
   .modal-actions { display: flex; gap: 8px; margin-top: 14px; }
   .modal-actions button { flex: 1; padding: 10px; border-radius: 8px; border: 1px solid var(--border); cursor: pointer; }
   .modal-actions .confirm { background: var(--danger); color: white; border: none; }
+.dot-pulse { display: none; gap: 3px; margin-left: 6px; vertical-align: middle; align-items: center; }
+.dot-pulse span { width: 5px; height: 5px; border-radius: 50%; background: var(--muted); animation: dotPulse 1.2s infinite ease-in-out; }
+.dot-pulse span:nth-child(2) { animation-delay: 0.2s; }
+.dot-pulse span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes dotPulse { 0%, 80%, 100% { opacity: 0.2; transform: scale(0.8); } 40% { opacity: 1; transform: scale(1); } }
+#typingIndicator { display: none; font-size: 12px; color: var(--muted); font-style: italic; margin: -4px 0 8px 4px; }
 </style>
 </head>
 <body>
@@ -123,10 +129,12 @@
 
 <!-- CHAT SCREEN -->
 <div class="screen" id="chatScreen">
-  <div class="status-bar">
-    <span id="statusText">Waiting for a match…</span>
-    <button class="secondary" id="backBtn">Leave</button>
-  </div>
+ <div class="status-bar">
+  <span>
+    <span id="statusLabel">Waiting for a match</span><span class="dot-pulse" id="waitingDots"><span></span><span></span><span></span></span>
+  </span>
+  <button class="secondary" id="backBtn">Leave</button>
+</div>
 
   <div class="video-grid" id="videoGrid">
     <video id="localVideo" autoplay playsinline muted></video>
@@ -134,7 +142,8 @@
   </div>
   <div id="textOnlyNotice">Text-only mode — no camera or mic is used.</div>
 
-  <div class="chat-log" id="chatLog"></div>
+ <div class="chat-log" id="chatLog"></div>
+<div id="typingIndicator">Stranger is typing…</div>
   <div class="chat-input-row">
     <input type="text" id="chatInput" placeholder="Type a message…" />
     <button class="secondary" id="sendBtn">Send</button>
